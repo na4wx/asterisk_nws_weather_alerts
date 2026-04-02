@@ -9,6 +9,8 @@ Type=simple
 Environment=NWS_USER_AGENT=FreePBX-NWS-Alert/1.0 (contact: you@domain.com)
 # Optional: adjust pre-wait before playback (seconds)
 Environment=NWS_PREWAIT_SEC=2
+# Optional: delay between sequential alerts (seconds) - prevents overlapping playback
+Environment=NWS_ALERT_DELAY_SEC=30
 ExecStart=/usr/bin/python3 /usr/local/bin/nws_alert_poller.py
 Restart=always
 RestartSec=15

@@ -15,6 +15,7 @@ SAME_CODES_FILE = Path("/usr/local/bin/sameCodes.json")  # SAME code -> county m
 # ------------------------------------------------------------
 USER_AGENT      = os.getenv("NWS_USER_AGENT", "FreePBX-NWS-Alert/1.0 (contact: yourname@example.com)")
 NWS_PREWAIT_SEC = int(os.getenv("NWS_PREWAIT_SEC", "2"))  # whole seconds of silence/1 before message
+NWS_ALERT_DELAY_SEC = int(os.getenv("NWS_ALERT_DELAY_SEC", "30"))  # delay between sequential alerts
 
 # ------------------------------------------------------------
 # API
@@ -231,6 +232,9 @@ def main():
 
     alerts = fetch_alerts()
     new_seen_pairs = set(seen_pairs)
+    
+    # Build a queue of calls ordered by alert timestamp
+    call_queue = []  # List of (sent_timestamp, ext, playbase, group_id)
 
     for f in alerts:
         props = f.get("properties", {}) or {}
@@ -245,6 +249,7 @@ def main():
         area     = props.get("areaDesc", "")
         headline = props.get("headline", "")
         description = props.get("description", "")
+        sent     = props.get("sent", "1970-01-01T00:00:00Z")  # Fallback timestamp
 
         # Map ext -> one SAME code (avoid duplicate calls when multiple codes match)
         ext_to_code = {}
@@ -284,18 +289,27 @@ def main():
             except Exception as e:
                 print(f"TTS fail for code {code} group {group_id}: {e}")
 
-        # Page each extension once
+        # Queue each extension call (don't call yet - will process in order)
         for ext, code in ext_to_code.items():
             playbase = code_to_playbase.get(code)
             if not playbase:
                 continue
-            try:
-                page_extension(ext, playbase)
-                new_seen_pairs.add(f"{group_id}|{ext}")
-            except Exception as e:
-                print(f"Page fail ext {ext} group {group_id}: {e}")
+            # Add to queue with timestamp for ordering
+            call_queue.append((sent, ext, playbase, group_id))
 
-    # Persist de-dupe state
+    # Sort queue by alert sent timestamp (chronological order)
+    call_queue.sort(key=lambda x: x[0])
+    
+    # Process the queue sequentially with delays
+    for i, (sent_ts, ext, playbase, group_id) in enumerate(call_queue):
+        try:
+            page_extension(ext, playbase)
+            new_seen_pairs.add(f"{group_id}|{ext}")
+            # Wait before next alert to ensure proper sequencing
+            if i < len(call_queue) - 1:
+                time.sleep(NWS_ALERT_DELAY_SEC)
+        except Exception as e:
+            print(f"Page fail ext {ext} group {group_id}: {e}")
     save_json(STATE_FILE, {"seen_pairs": sorted(new_seen_pairs)})
 
     # Housekeeping
