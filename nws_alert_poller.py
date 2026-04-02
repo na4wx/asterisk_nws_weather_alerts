@@ -8,6 +8,7 @@ from pathlib import Path
 SUBS_FILE = Path("/var/lib/asterisk/nws_subscriptions.json")
 SOUNDS_DIR  = Path("/var/lib/asterisk/sounds/custom")
 STATE_FILE  = Path("/var/lib/asterisk/nws_alert_state.json")
+SAME_CODES_FILE = Path("/usr/local/bin/sameCodes.json")  # SAME code -> county mapping
 
 # ------------------------------------------------------------
 # Config (env overrides allowed)
@@ -39,6 +40,15 @@ def load_json(path, default):
 def save_json(path, obj):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(obj, indent=2))
+
+def load_same_codes():
+    """Load SAME code -> county name mapping from sameCodes.json"""
+    codes_list = load_json(SAME_CODES_FILE, [])
+    result = {}
+    for item in codes_list:
+        if isinstance(item, dict):
+            result.update(item)
+    return result
 
 def fetch_alerts():
     req = urllib.request.Request(
@@ -89,6 +99,46 @@ def canonical_alert_group_id(props: dict) -> str:
     if ref_id:
         return ref_id
     return props.get("id") or hashlib.sha1(json.dumps(props, sort_keys=True).encode()).hexdigest()
+
+def extract_weather_phenomenon(description: str) -> str:
+    """
+    Extract key weather phenomenon from description.
+    First tries pattern matching against common hazards.
+    Falls back to extracting first noun phrase if no pattern match.
+    """
+    if not description:
+        return "Weather Alert"
+    
+    # Common weather phenomena to match (case-insensitive)
+    phenomena = [
+        "dense fog", "heavy snow", "heavy rain", "thunderstorm", "high wind",
+        "frost", "freeze", "heat advisory", "wind chill", "blizzard",
+        "tornado", "flash flood", "flood", "winter storm", "ice storm",
+        "severe thunderstorm", "hail", "extreme cold", "heat", "wind advisory",
+        "winter weather", "lake effect snow", "sleet", "freezing rain",
+        "fog advisory", "freeze warning", "frost advisory"
+    ]
+    
+    desc_lower = description.lower()
+    for phenomenon in phenomena:
+        if phenomenon in desc_lower:
+            # Return in title case
+            return " ".join(word.capitalize() for word in phenomenon.split())
+    
+    # Fallback: extract first sentence and get opening phrase
+    first_sentence = description.split(".")[0] if "." in description else description
+    first_sentence = first_sentence.strip()
+    
+    # Try to extract first few words (typically contains the key phenomenon)
+    words = first_sentence.split()
+    if len(words) >= 2:
+        # Return first 2-3 words (e.g., "Patchy dense fog" -> "Patchy Dense Fog")
+        phrase = " ".join(words[:3]) if len(words) >= 3 else " ".join(words[:2])
+        return " ".join(word.capitalize() for word in phrase.split())
+    elif len(words) == 1:
+        return words[0].capitalize()
+    
+    return "Weather Alert"
 
 def tts_wav16_base(text: str, same_code: str, group_id: str) -> str:
     """
@@ -172,8 +222,11 @@ def cleanup_old_audio():
 # Main
 # ------------------------------------------------------------
 def main():
+    global same_codes_lookup
+    
     subs = load_json(SUBS_FILE, [])
     state = load_json(STATE_FILE, {"seen_pairs": []})
+    same_codes_lookup = load_same_codes()  # Load SAME code -> county mapping
     seen_pairs = set(state.get("seen_pairs", []))   # keys: "<group_id>|<ext>"
 
     alerts = fetch_alerts()
@@ -187,13 +240,11 @@ def main():
 
         group_id = canonical_alert_group_id(props)
 
-        # Build concise message
+        # Extract alert properties
         event    = props.get("event", "Weather Alert")
         area     = props.get("areaDesc", "")
         headline = props.get("headline", "")
-        msg = f"National Weather Service. {event}. Affected area: {area}. {headline}"
-        if len(msg) > 900:
-            msg = msg[:900] + "..."
+        description = props.get("description", "")
 
         # Map ext -> one SAME code (avoid duplicate calls when multiple codes match)
         ext_to_code = {}
@@ -215,6 +266,19 @@ def main():
         # Ensure audio exists for each code we’ll use
         code_to_playbase = {}
         for code in sorted(set(ext_to_code.values())):
+            # Build code-specific message with county name from SAME code lookup
+            if event == "Special Weather Statement":
+                # Extract the actual phenomenon from description (e.g., "Dense Fog")
+                phenomenon = extract_weather_phenomenon(description)
+                msg = f"National Weather Service. {phenomenon}. {description}"
+            else:
+                # Use county name from SAME code instead of full area description
+                county = same_codes_lookup.get(code, area)
+                msg = f"National Weather Service. {event}. Affected area: {county}. {headline}"
+            
+            if len(msg) > 900:
+                msg = msg[:900] + "..."
+            
             try:
                 code_to_playbase[code] = tts_wav16_base(msg, code, group_id)
             except Exception as e:

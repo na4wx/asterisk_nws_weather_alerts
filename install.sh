@@ -100,6 +100,7 @@ cp -f "$ROOT_DIR/extensions_custom.conf"  "$AST_CONF_DIR/"
 cp -f "$ROOT_DIR/generatePrompts.sh"      "$BIN_DIR/"
 cp -f "$ROOT_DIR/nws_alert_poller.py"     "$BIN_DIR/"
 cp -f "$ROOT_DIR/nws-alert-poller.service" "$SYSTEMD_DIR/"
+cp -f "$ROOT_DIR/sameCodes.json"          "$BIN_DIR/"
 # optional manual pager script if present with either name
 if [[ -f "$ROOT_DIR/multiPage.sh" ]]; then
   cp -f "$ROOT_DIR/multiPage.sh" "$BIN_DIR/"
