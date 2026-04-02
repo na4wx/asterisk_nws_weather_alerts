@@ -97,7 +97,7 @@ mkdir -p "$AGI_DIR" "$AST_CONF_DIR" "$SOUNDS_DIR" "$BIN_DIR" "$SYSTEMD_DIR"
 echo "Copying files..."
 cp -f "$ROOT_DIR/same_subs.py"            "$AGI_DIR/"
 cp -f "$ROOT_DIR/extensions_custom.conf"  "$AST_CONF_DIR/"
-cp -f "$ROOT_DIR/generatePrompts.sh"      "$BIN_DIR/"
+cp -f "$ROOT_DIR/generate_prompts.sh"     "$BIN_DIR/"
 cp -f "$ROOT_DIR/nws_alert_poller.py"     "$BIN_DIR/"
 cp -f "$ROOT_DIR/nws-alert-poller.service" "$SYSTEMD_DIR/"
 cp -f "$ROOT_DIR/sameCodes.json"          "$BIN_DIR/"
@@ -110,7 +110,7 @@ fi
 
 # ---------- Permissions ----------
 chmod +x "$AGI_DIR/same_subs.py"
-chmod +x "$BIN_DIR/generatePrompts.sh"
+chmod +x "$BIN_DIR/generate_prompts.sh"
 chmod +x "$BIN_DIR/nws_alert_poller.py"
 [[ -f "$BIN_DIR/multiPage.sh" ]] && chmod +x "$BIN_DIR/multiPage.sh"
 chown -R asterisk:asterisk "$SOUNDS_DIR"
@@ -157,7 +157,7 @@ fi
 
 # ---------- Generate prompts ----------
 echo "Generating menu prompts..."
-"$BIN_DIR/generatePrompts.sh" || die "Prompt generation failed."
+"$BIN_DIR/generate_prompts.sh" || die "Prompt generation failed."
 
 # ---------- FreePBX reload ----------
 echo "Reloading FreePBX dialplan..."
