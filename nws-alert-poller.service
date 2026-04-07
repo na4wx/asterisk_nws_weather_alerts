@@ -11,6 +11,9 @@ Environment=NWS_USER_AGENT=FreePBX-NWS-Alert/1.0 (contact: you@domain.com)
 Environment=NWS_PREWAIT_SEC=2
 # Optional: delay between sequential alerts (seconds) - prevents overlapping playback
 Environment=NWS_ALERT_DELAY_SEC=30
+# Caller ID shown on alerted phones (name and number)
+Environment=NWS_CID_NAME=System Alert
+Environment=NWS_CID_NUM=0000
 ExecStart=/usr/bin/python3 /usr/local/bin/nws_alert_poller.py
 Restart=always
 RestartSec=15

@@ -101,6 +101,11 @@ cp -f "$ROOT_DIR/generate_prompts.sh"     "$BIN_DIR/"
 cp -f "$ROOT_DIR/nws_alert_poller.py"     "$BIN_DIR/"
 cp -f "$ROOT_DIR/nws-alert-poller.service" "$SYSTEMD_DIR/"
 cp -f "$ROOT_DIR/sameCodes.json"          "$BIN_DIR/"
+if [[ -f "$ROOT_DIR/zip_to_same.json" ]]; then
+  cp -f "$ROOT_DIR/zip_to_same.json"      "$BIN_DIR/"
+else
+  echo "WARN: zip_to_same.json not found. ZIP lookup menu option will be unavailable."
+fi
 # optional manual pager script if present with either name
 if [[ -f "$ROOT_DIR/multiPage.sh" ]]; then
   cp -f "$ROOT_DIR/multiPage.sh" "$BIN_DIR/"
@@ -142,14 +147,34 @@ else
   echo "WARN: $UNIT_FILE not found; skipping service customization."
 fi
 
-# ---------- Update CallerID in poller + manual pager ----------
-# Poller: replace callerid "System Alert" <0000>
-POLL_FILE="$BIN_DIR/nws_alert_poller.py"
-if [[ -f "$POLL_FILE" ]]; then
-  sed -i -E "s/callerid \"[^\"]+\" <[^>]+>/callerid \"${CID_NAME}\" <${CID_NUM}>/g" "$POLL_FILE"
+# ---------- Update CallerID in service unit (env vars read by poller) ----------
+UNIT_FILE="$SYSTEMD_DIR/nws-alert-poller.service"
+if [[ -f "$UNIT_FILE" ]]; then
+  # NWS_CID_NAME
+  if grep -q '^Environment=NWS_CID_NAME=' "$UNIT_FILE"; then
+    sed -i -E "s/^Environment=NWS_CID_NAME=.*/Environment=NWS_CID_NAME=${CID_NAME}/" "$UNIT_FILE"
+  else
+    awk -v ins="Environment=NWS_CID_NAME=${CID_NAME}" '
+      BEGIN{added=0}
+      /^\[Service\]/{print; print ins; added=1; next}
+      {print}
+      END{if(!added) print ins}
+    ' "$UNIT_FILE" > "${UNIT_FILE}.tmp" && mv "${UNIT_FILE}.tmp" "$UNIT_FILE"
+  fi
+  # NWS_CID_NUM
+  if grep -q '^Environment=NWS_CID_NUM=' "$UNIT_FILE"; then
+    sed -i -E "s/^Environment=NWS_CID_NUM=.*/Environment=NWS_CID_NUM=${CID_NUM}/" "$UNIT_FILE"
+  else
+    awk -v ins="Environment=NWS_CID_NUM=${CID_NUM}" '
+      BEGIN{added=0}
+      /^\[Service\]/{print; print ins; added=1; next}
+      {print}
+      END{if(!added) print ins}
+    ' "$UNIT_FILE" > "${UNIT_FILE}.tmp" && mv "${UNIT_FILE}.tmp" "$UNIT_FILE"
+  fi
 fi
 
-# multiPage.sh: same replacement if present
+# ---------- Update CallerID in manual pager (still uses inline callerid) ----------
 MP_FILE="$BIN_DIR/multiPage.sh"
 if [[ -f "$MP_FILE" ]]; then
   sed -i -E "s/callerid \"[^\"]+\" <[^>]+>/callerid \"${CID_NAME}\" <${CID_NUM}>/g" "$MP_FILE"
@@ -197,8 +222,9 @@ If you ever need to change:
   - SAME menu extension: edit /etc/asterisk/extensions_custom.conf and 'fwconsole reload'
   - Email or delay: edit /etc/systemd/system/nws-alert-poller.service, then:
        systemctl daemon-reload && systemctl restart nws-alert-poller
-  - Caller ID: update the originate lines in
-       /usr/local/bin/nws_alert_poller.py and /usr/local/bin/multiPage.sh
+  - Caller ID: edit NWS_CID_NAME / NWS_CID_NUM in /etc/systemd/system/nws-alert-poller.service,
+       then: systemctl daemon-reload && systemctl restart nws-alert-poller
+       (For the manual pager, also update /usr/local/bin/multiPage.sh)
 
 Enjoy fast, HD NWS alerts on your PBX! 🌩
 ==============================================================

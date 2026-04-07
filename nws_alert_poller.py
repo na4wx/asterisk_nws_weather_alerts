@@ -13,9 +13,11 @@ SAME_CODES_FILE = Path("/usr/local/bin/sameCodes.json")  # SAME code -> county m
 # ------------------------------------------------------------
 # Config (env overrides allowed)
 # ------------------------------------------------------------
-USER_AGENT      = os.getenv("NWS_USER_AGENT", "FreePBX-NWS-Alert/1.0 (contact: yourname@example.com)")
-NWS_PREWAIT_SEC = int(os.getenv("NWS_PREWAIT_SEC", "2"))  # whole seconds of silence/1 before message
+USER_AGENT          = os.getenv("NWS_USER_AGENT", "FreePBX-NWS-Alert/1.0 (contact: yourname@example.com)")
+NWS_PREWAIT_SEC     = int(os.getenv("NWS_PREWAIT_SEC", "2"))  # whole seconds of silence/1 before message
 NWS_ALERT_DELAY_SEC = int(os.getenv("NWS_ALERT_DELAY_SEC", "30"))  # delay between sequential alerts
+CID_NAME            = os.getenv("NWS_CID_NAME", "System Alert")
+CID_NUM             = os.getenv("NWS_CID_NUM", "0000")
 
 # ------------------------------------------------------------
 # API
@@ -197,10 +199,14 @@ def page_extension(ext: str, playback_base: str):
     else:
         play_chain = playback_base
 
+    # Use the context/exten/priority form so that callerid is honoured by
+    # Asterisk before the channel is answered.  The 'application' form
+    # ignores the trailing callerid token and falls back to the PBX IP.
     subprocess.run([
-        "asterisk","-rx",
-        f"channel originate Local/*80{ext}@from-internal "
-        f"application Playback {play_chain} callerid \"System Alert\" <0000>"
+        "asterisk", "-rx",
+        f"channel originate Local/*80{ext}@from-internal"
+        f" extension {play_chain}@app-nws-alert-play"
+        f" callerid \"{CID_NAME}\" <{CID_NUM}>"
     ], check=False)
 
 

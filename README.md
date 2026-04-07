@@ -9,6 +9,7 @@ This system transforms your FreePBX into a **live weather alerting platform** po
    * Press **1** → Add a SAME (FIPS) code (6 digits)
    * Press **2** → Remove a SAME code
    * Press **3** → Hear a list of your subscribed SAME codes
+  * Press **4** → Enter ZIP code, then choose county/SAME code
 
 2. **Sit back and relax** ☕
    When the NWS issues an alert for any of your SAME codes:
@@ -72,6 +73,8 @@ If you prefer to install manually, follow these steps:
 | `generatePrompts.sh`       | Generates the **menu audio prompts** (wideband)                        |
 | `nws_alert_poller.py`      | Polls NWS API, generates TTS audio, **auto-answers** target extensions |
 | `nws-alert-poller.service` | systemd unit to keep the poller running continuously                   |
+| `zip_to_same.json`         | Offline ZIP → county/SAME lookup data for menu option **4**            |
+| `tools/build_lookup_data.py` | Builds ZIP lookup + enriched SAME metadata artifacts                   |
 | `multiPage.sh`             | Manual sender script to page multiple extensions with TTS + delay      |
 
 > **Important:** Where this guide says `you@domain.com`, change it to **your real email**. NWS requires a valid contact in the User-Agent.
@@ -182,6 +185,15 @@ apt-get install -y libttspico-utils sox
 * Subscriptions (written by the menu/AGI):
   `/etc/asterisk/nws_subscriptions.json`
 
+* ZIP lookup data (used by AGI menu option 4):
+  `/usr/local/bin/zip_to_same.json`
+
+* Enriched SAME metadata (optional, generated):
+  `/usr/local/bin/same_metadata.json`
+
+* Full SAME list with state/county/ZIP coverage (optional, generated):
+  `/usr/local/bin/same_codes_enriched.json`
+
 * De-duplication state (written by poller):
   `/var/lib/asterisk/nws_alert_state.json`
 
@@ -191,6 +203,27 @@ apt-get install -y libttspico-utils sox
 ---
 
 ## Testing & Troubleshooting
+
+### Build Offline ZIP Lookup Data
+
+The repo includes a builder script to generate production lookup files from a local ZIP/county CSV plus `sameCodes.json`.
+
+1. Put your ZIP/county crosswalk CSV at `data/zip_county.csv`.
+   Required columns (case-insensitive aliases supported): ZIP, county, state.
+2. Run:
+
+```bash
+python3 tools/build_lookup_data.py \
+  --same-codes sameCodes.json \
+  --zip-county-csv data/zip_county.csv \
+  --out-zip zip_to_same.json \
+  --out-same data/same_metadata.json \
+  --out-enriched data/same_codes_enriched.json
+```
+
+3. Re-run `install.sh` (or copy files manually) so `/usr/local/bin/zip_to_same.json` is updated.
+
+The builder does a best-effort enrichment pass against `https://www.weather.gov/nwr/county_coverage?State=<STATE_ABBR>` to prefer weather.gov county naming in generated metadata.
 
 * **Dialplan loaded?**
 
