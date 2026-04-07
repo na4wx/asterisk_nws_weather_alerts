@@ -157,6 +157,8 @@ def tts_wav16_base(text: str, same_code: str, group_id: str) -> str:
     Asterisk's format_pcm.so which is always loaded; no optional modules needed.
     Secondary format: .wav16 (16 kHz signed-linear WAV) — wideband quality
     for G.722 endpoints; generated best-effort, failure is non-fatal.
+    The configured pre-wait is baked into the front of the audio so playback
+    starts reliably after the phone auto-answers, without extra dialplan steps.
     Returns the Playback base, e.g. 'custom/nws_047001_ab12cd34'.
     """
     SOUNDS_DIR.mkdir(parents=True, exist_ok=True)
@@ -218,14 +220,14 @@ def tts_wav16_base(text: str, same_code: str, group_id: str) -> str:
     subprocess.run([
         "sox", str(tmp_in),
         "-r", "8000", "-c", "1", "-b", "8", "-e", "u-law", "-t", "ul",
-        str(tmp_ulaw)
+        str(tmp_ulaw), "pad", str(NWS_PREWAIT_SEC), "0"
     ], check=True)
 
     # Secondary: 16 kHz wideband WAV — best-effort, failure is non-fatal
     subprocess.run([
         "sox", str(tmp_in),
         "-r", "16000", "-c", "1", "-b", "16", "-e", "signed-integer",
-        str(tmp_wav16), "norm", "-3"
+        str(tmp_wav16), "pad", str(NWS_PREWAIT_SEC), "0", "norm", "-3"
     ], check=False)
 
     final_ulaw.unlink(missing_ok=True)
@@ -244,24 +246,36 @@ def tts_wav16_base(text: str, same_code: str, group_id: str) -> str:
 
 def page_extension(ext: str, playback_base: str):
     """
-    Auto-answer via *80 intercom, wait NWS_PREWAIT_SEC seconds for the phone
-    to auto-answer, then play the alert audio.  The playback path and wait
-    duration are passed as channel variables.
+    Writes an Asterisk call file that places an intercom call and, once the
+    far end answers, runs Playback() directly on the generated alert audio.
 
-    IMPORTANT: the 'custom/' prefix is stripped from the filename before being
-    passed as a variable value.  Asterisk's CLI originate parser treats '/' as
-    a context/extension/priority separator inside variable values, which would
-    truncate the value at the slash.  The dialplan re-adds 'custom/' itself.
+    This avoids the extra app-nws-alert-play dialplan hop entirely: no custom
+    variables, no extension-name encoding, and no parsing edge cases between
+    the poller and Asterisk.
     """
-    # Remove leading 'custom/' so no slash appears in the variable value.
     filename = playback_base.removeprefix("custom/")
-    subprocess.run([
-        "asterisk", "-rx",
-        f"channel originate Local/*80{ext}@from-internal"
-        f" extension nws_alert@app-nws-alert-play"
-        f" callerid \"{CID_NAME}\" <{CID_NUM}>"
-        f" variable NWS_FILE={filename},NWS_PREWAIT={NWS_PREWAIT_SEC}"
-    ], check=False)
+    call_lines = [
+        f"Channel: Local/*80{ext}@from-internal",
+        f"Application: Playback",
+        f"Data: custom/{filename}",
+        f'CallerID: "{CID_NAME}" <{CID_NUM}>',
+        f"WaitTime: 30",
+        f"MaxRetries: 0",
+    ]
+
+    spool_tmp = Path("/var/spool/asterisk/tmp")
+    spool_out = Path("/var/spool/asterisk/outgoing")
+    for d in (spool_tmp, spool_out):
+        d.mkdir(parents=True, exist_ok=True)
+
+    call_id = f"nws_{ext}_{int(time.time())}"
+    tmp_path = spool_tmp / f"{call_id}.call"
+    out_path = spool_out / f"{call_id}.call"
+
+    tmp_path.write_text("\n".join(call_lines) + "\n")
+    _fix_perms(tmp_path)
+    # Atomic rename into outgoing/ — Asterisk picks it up immediately
+    tmp_path.rename(out_path)
 
 
 def cleanup_old_audio():
