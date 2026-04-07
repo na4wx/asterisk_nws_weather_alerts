@@ -14,7 +14,7 @@ SAME_CODES_FILE = Path("/usr/local/bin/sameCodes.json")  # SAME code -> county m
 # Config (env overrides allowed)
 # ------------------------------------------------------------
 USER_AGENT          = os.getenv("NWS_USER_AGENT", "FreePBX-NWS-Alert/1.0 (contact: yourname@example.com)")
-NWS_PREWAIT_SEC     = int(os.getenv("NWS_PREWAIT_SEC", "2"))  # whole seconds of silence/1 before message
+NWS_PREWAIT_SEC     = int(os.getenv("NWS_PREWAIT_SEC", "2"))  # seconds to wait after answer before playing audio
 NWS_ALERT_DELAY_SEC = int(os.getenv("NWS_ALERT_DELAY_SEC", "30"))  # delay between sequential alerts
 CID_NAME            = os.getenv("NWS_CID_NAME", "System Alert")
 CID_NUM             = os.getenv("NWS_CID_NUM", "0000")
@@ -254,8 +254,7 @@ def page_extension(ext: str, playback_base: str):
         f"channel originate Local/*80{ext}@from-internal"
         f" extension nws_alert@app-nws-alert-play"
         f" callerid \"{CID_NAME}\" <{CID_NUM}>"
-        f" variable NWS_PLAYBACK={playback_base}"
-        f" variable NWS_PREWAIT={NWS_PREWAIT_SEC}"
+        f" variable NWS_PLAYBACK={playback_base},NWS_PREWAIT={NWS_PREWAIT_SEC}"
     ], check=False)
 
 
