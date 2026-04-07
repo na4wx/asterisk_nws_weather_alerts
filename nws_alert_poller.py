@@ -149,92 +149,103 @@ def extract_weather_phenomenon(description: str) -> str:
     
     return "Weather Alert"
 
+def _fix_perms(path: Path):
+    """Set ownership to asterisk:asterisk and mode 644."""
+    try:
+        import pwd, grp
+        os.chown(path, pwd.getpwnam("asterisk").pw_uid, grp.getgrnam("asterisk").gr_gid)
+    except Exception:
+        pass
+    os.chmod(path, 0o644)
+
 def tts_wav16_base(text: str, same_code: str, group_id: str) -> str:
     """
-    Ensure both narrowband (.wav) and wideband (.wav16) mono PCM files
-    exist for this SAME+group.
-    Returns the base for Playback, e.g., 'custom/nws_047001_ab12cd34'.
+    Ensure audio files exist for this SAME+group.
+    Primary format: .ulaw (raw G.711 μ-law, 8 kHz) — natively supported by
+    Asterisk's format_pcm.so which is always loaded; no optional modules needed.
+    Secondary format: .wav16 (16 kHz signed-linear WAV) — wideband quality
+    for G.722 endpoints; generated best-effort, failure is non-fatal.
+    Returns the Playback base, e.g. 'custom/nws_047001_ab12cd34'.
     """
     SOUNDS_DIR.mkdir(parents=True, exist_ok=True)
     gid_short = sanitize_id(group_id) or hashlib.sha1(group_id.encode()).hexdigest()[:10]
     base = f"{CACHE_PREFIX}{same_code}_{gid_short}"
-    final_wav = SOUNDS_DIR / f"{base}.wav"
+    final_ulaw  = SOUNDS_DIR / f"{base}.ulaw"
     final_wav16 = SOUNDS_DIR / f"{base}.wav16"
 
-    if final_wav.exists() and final_wav16.exists():
-        return f"custom/{base}"
-    if final_wav16.exists() and not final_wav.exists():
-        subprocess.run([
-            "sox", str(final_wav16),
-            "-r", "8000", "-c", "1", "-b", "16", "-e", "signed-integer",
-            str(final_wav), "norm", "-3"
-        ], check=True)
-        try:
-            import pwd, grp
-            os.chown(final_wav, pwd.getpwnam("asterisk").pw_uid, grp.getgrnam("asterisk").gr_gid)
-        except Exception:
-            pass
-        os.chmod(final_wav, 0o644)
-        return f"custom/{base}"
-    if final_wav.exists() and not final_wav16.exists():
-        subprocess.run([
-            "sox", str(final_wav),
-            "-r", "16000", "-c", "1", "-b", "16", "-e", "signed-integer",
-            str(final_wav16), "norm", "-3"
-        ], check=True)
-        try:
-            import pwd, grp
-            os.chown(final_wav16, pwd.getpwnam("asterisk").pw_uid, grp.getgrnam("asterisk").gr_gid)
-        except Exception:
-            pass
-        os.chmod(final_wav16, 0o644)
+    # --- Cache hit ---
+    if final_ulaw.exists():
         return f"custom/{base}"
 
-    tmp_in  = Path("/tmp/nws_tts_in.wav")
-    tmp_out_16 = Path("/tmp/nws_tts_out_16.wav")
-    tmp_out_8 = Path("/tmp/nws_tts_out_8.wav")
+    # --- Migration: wav16 exists but ulaw doesn't ---
+    # (covers audio cached by an older version of this script)
+    if final_wav16.exists():
+        tmp_mig = Path("/tmp/nws_tts_mig.ulaw")
+        try:
+            subprocess.run([
+                "sox", str(final_wav16),
+                "-r", "8000", "-c", "1", "-e", "u-law",
+                str(tmp_mig)
+            ], check=True)
+            tmp_mig.replace(final_ulaw)
+            _fix_perms(final_ulaw)
+        except Exception as e:
+            print(f"Migration wav16->ulaw failed for {base}: {e}")
+            tmp_mig.unlink(missing_ok=True)
+        if final_ulaw.exists():
+            return f"custom/{base}"
+        # migration failed — fall through to fresh TTS
+
+    # --- Also migrate legacy .wav files left by an older fix ---
+    legacy_wav = SOUNDS_DIR / f"{base}.wav"
+    if legacy_wav.exists() and not final_ulaw.exists():
+        tmp_mig = Path("/tmp/nws_tts_mig.ulaw")
+        try:
+            subprocess.run([
+                "sox", str(legacy_wav),
+                "-r", "8000", "-c", "1", "-e", "u-law",
+                str(tmp_mig)
+            ], check=True)
+            tmp_mig.replace(final_ulaw)
+            _fix_perms(final_ulaw)
+        except Exception as e:
+            print(f"Migration wav->ulaw failed for {base}: {e}")
+            tmp_mig.unlink(missing_ok=True)
+        if final_ulaw.exists():
+            return f"custom/{base}"
+
+    # --- Fresh TTS generation ---
+    tmp_in      = Path("/tmp/nws_tts_in.wav")
+    tmp_ulaw    = Path("/tmp/nws_tts_out.ulaw")
+    tmp_wav16   = Path("/tmp/nws_tts_out.wav16")
 
     subprocess.run(["pico2wave", "-l", "en-US", "-w", str(tmp_in), text], check=True)
+
+    # Primary: raw G.711 μ-law — always playable by Asterisk
+    subprocess.run([
+        "sox", str(tmp_in),
+        "-r", "8000", "-c", "1", "-e", "u-law",
+        str(tmp_ulaw)
+    ], check=True)
+
+    # Secondary: 16 kHz wideband WAV — best-effort, failure is non-fatal
     subprocess.run([
         "sox", str(tmp_in),
         "-r", "16000", "-c", "1", "-b", "16", "-e", "signed-integer",
-        str(tmp_out_16), "norm", "-3"
-    ], check=True)
-    subprocess.run([
-        "sox", str(tmp_out_16),
-        "-r", "8000", "-c", "1", "-b", "16", "-e", "signed-integer",
-        str(tmp_out_8), "norm", "-3"
-    ], check=True)
+        str(tmp_wav16), "norm", "-3"
+    ], check=False)
 
-    final_wav.unlink(missing_ok=True)
+    final_ulaw.unlink(missing_ok=True)
     final_wav16.unlink(missing_ok=True)
 
-    tmp_out_8.replace(final_wav)
-    tmp_out_16.replace(final_wav16)
+    tmp_ulaw.replace(final_ulaw)
+    _fix_perms(final_ulaw)
+    if tmp_wav16.exists():
+        tmp_wav16.replace(final_wav16)
+        _fix_perms(final_wav16)
 
-    try:
-        import pwd, grp
-        uid = pwd.getpwnam("asterisk").pw_uid
-        gid = grp.getgrnam("asterisk").gr_gid
-        os.chown(final_wav, uid, gid)
-        os.chown(final_wav16, uid, gid)
-    except Exception:
-        pass
-    os.chmod(final_wav, 0o644)
-    os.chmod(final_wav16, 0o644)
-
-    try:
-        tmp_in.unlink(missing_ok=True)
-    except Exception:
-        pass
-    try:
-        tmp_out_8.unlink(missing_ok=True)
-    except Exception:
-        pass
-    try:
-        tmp_out_16.unlink(missing_ok=True)
-    except Exception:
-        pass
+    for tmp in [tmp_in, tmp_ulaw, tmp_wav16]:
+        tmp.unlink(missing_ok=True)
 
     return f"custom/{base}"
 
@@ -261,18 +272,13 @@ def page_extension(ext: str, playback_base: str):
 
 def cleanup_old_audio():
     now = time.time()
-    for p in SOUNDS_DIR.glob(f"{CACHE_PREFIX}*.wav16"):
-        try:
-            if now - p.stat().st_mtime > CACHE_TTL_SECS:
-                p.unlink()
-        except Exception:
-            pass
-    for p in SOUNDS_DIR.glob(f"{CACHE_PREFIX}*.wav"):
-        try:
-            if now - p.stat().st_mtime > CACHE_TTL_SECS:
-                p.unlink()
-        except Exception:
-            pass
+    for ext in ("*.ulaw", "*.wav16", "*.wav"):
+        for p in SOUNDS_DIR.glob(f"{CACHE_PREFIX}{ext}"):
+            try:
+                if now - p.stat().st_mtime > CACHE_TTL_SECS:
+                    p.unlink()
+            except Exception:
+                pass
 
 # ------------------------------------------------------------
 # Main
