@@ -99,6 +99,12 @@ def canonical_alert_group_id(props: dict) -> str:
                 ref_id = _first_ref_id_from_string(item)
                 if ref_id:
                     break
+            elif isinstance(item, dict):
+                # NWS GeoJSON commonly uses a list of reference objects.
+                # Prefer the stable identifier to tie updates to the same thread.
+                ref_id = item.get("identifier") or item.get("@id")
+                if ref_id:
+                    break
     if ref_id:
         return ref_id
     return props.get("id") or hashlib.sha1(json.dumps(props, sort_keys=True).encode()).hexdigest()
@@ -145,7 +151,8 @@ def extract_weather_phenomenon(description: str) -> str:
 
 def tts_wav16_base(text: str, same_code: str, group_id: str) -> str:
     """
-    Ensure a 16k mono PCM .wav16 exists for this SAME+group.
+    Ensure both narrowband (.wav) and wideband (.wav16) mono PCM files
+    exist for this SAME+group.
     Returns the base for Playback, e.g., 'custom/nws_047001_ab12cd34'.
     """
     SOUNDS_DIR.mkdir(parents=True, exist_ok=True)
@@ -154,36 +161,78 @@ def tts_wav16_base(text: str, same_code: str, group_id: str) -> str:
     final_wav = SOUNDS_DIR / f"{base}.wav"
     final_wav16 = SOUNDS_DIR / f"{base}.wav16"
 
-    if final_wav16.exists():
+    if final_wav.exists() and final_wav16.exists():
+        return f"custom/{base}"
+    if final_wav16.exists() and not final_wav.exists():
+        subprocess.run([
+            "sox", str(final_wav16),
+            "-r", "8000", "-c", "1", "-b", "16", "-e", "signed-integer",
+            str(final_wav), "norm", "-3"
+        ], check=True)
+        try:
+            import pwd, grp
+            os.chown(final_wav, pwd.getpwnam("asterisk").pw_uid, grp.getgrnam("asterisk").gr_gid)
+        except Exception:
+            pass
+        os.chmod(final_wav, 0o644)
+        return f"custom/{base}"
+    if final_wav.exists() and not final_wav16.exists():
+        subprocess.run([
+            "sox", str(final_wav),
+            "-r", "16000", "-c", "1", "-b", "16", "-e", "signed-integer",
+            str(final_wav16), "norm", "-3"
+        ], check=True)
+        try:
+            import pwd, grp
+            os.chown(final_wav16, pwd.getpwnam("asterisk").pw_uid, grp.getgrnam("asterisk").gr_gid)
+        except Exception:
+            pass
+        os.chmod(final_wav16, 0o644)
         return f"custom/{base}"
 
     tmp_in  = Path("/tmp/nws_tts_in.wav")
-    tmp_out = Path("/tmp/nws_tts_out.wav")
+    tmp_out_16 = Path("/tmp/nws_tts_out_16.wav")
+    tmp_out_8 = Path("/tmp/nws_tts_out_8.wav")
 
     subprocess.run(["pico2wave", "-l", "en-US", "-w", str(tmp_in), text], check=True)
     subprocess.run([
         "sox", str(tmp_in),
         "-r", "16000", "-c", "1", "-b", "16", "-e", "signed-integer",
-        str(tmp_out), "norm", "-3"
+        str(tmp_out_16), "norm", "-3"
+    ], check=True)
+    subprocess.run([
+        "sox", str(tmp_out_16),
+        "-r", "8000", "-c", "1", "-b", "16", "-e", "signed-integer",
+        str(tmp_out_8), "norm", "-3"
     ], check=True)
 
-    if final_wav.exists():
-        final_wav.unlink(missing_ok=True)
-    if final_wav16.exists():
-        final_wav16.unlink(missing_ok=True)
+    final_wav.unlink(missing_ok=True)
+    final_wav16.unlink(missing_ok=True)
 
-    tmp_out.replace(final_wav)
-    final_wav.rename(final_wav16)
+    tmp_out_8.replace(final_wav)
+    tmp_out_16.replace(final_wav16)
 
     try:
         import pwd, grp
-        os.chown(final_wav16, pwd.getpwnam("asterisk").pw_uid, grp.getgrnam("asterisk").gr_gid)
+        uid = pwd.getpwnam("asterisk").pw_uid
+        gid = grp.getgrnam("asterisk").gr_gid
+        os.chown(final_wav, uid, gid)
+        os.chown(final_wav16, uid, gid)
     except Exception:
         pass
+    os.chmod(final_wav, 0o644)
     os.chmod(final_wav16, 0o644)
 
     try:
         tmp_in.unlink(missing_ok=True)
+    except Exception:
+        pass
+    try:
+        tmp_out_8.unlink(missing_ok=True)
+    except Exception:
+        pass
+    try:
+        tmp_out_16.unlink(missing_ok=True)
     except Exception:
         pass
 
