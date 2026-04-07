@@ -246,15 +246,21 @@ def page_extension(ext: str, playback_base: str):
     """
     Auto-answer via *80 intercom, wait NWS_PREWAIT_SEC seconds for the phone
     to auto-answer, then play the alert audio.  The playback path and wait
-    duration are passed as channel variables so the dialplan extension name
-    stays a simple, fixed string with no embedded slashes or ampersands.
+    duration are passed as channel variables.
+
+    IMPORTANT: the 'custom/' prefix is stripped from the filename before being
+    passed as a variable value.  Asterisk's CLI originate parser treats '/' as
+    a context/extension/priority separator inside variable values, which would
+    truncate the value at the slash.  The dialplan re-adds 'custom/' itself.
     """
+    # Remove leading 'custom/' so no slash appears in the variable value.
+    filename = playback_base.removeprefix("custom/")
     subprocess.run([
         "asterisk", "-rx",
         f"channel originate Local/*80{ext}@from-internal"
         f" extension nws_alert@app-nws-alert-play"
         f" callerid \"{CID_NAME}\" <{CID_NUM}>"
-        f" variable NWS_PLAYBACK={playback_base},NWS_PREWAIT={NWS_PREWAIT_SEC}"
+        f" variable NWS_FILE={filename},NWS_PREWAIT={NWS_PREWAIT_SEC}"
     ], check=False)
 
 
