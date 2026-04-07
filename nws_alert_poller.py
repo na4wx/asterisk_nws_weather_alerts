@@ -28,8 +28,14 @@ NWS_URL = "https://api.weather.gov/alerts/active?status=actual&message_type=aler
 # ------------------------------------------------------------
 # Audio cache naming / retention
 # ------------------------------------------------------------
-CACHE_PREFIX   = "nws_"          # final files: nws_<SAME>_<GROUP>.wav16
+CACHE_PREFIX   = "nws_"          # final files: nws_<SAME>_<GROUP>.ulaw
 CACHE_TTL_SECS = 2 * 24 * 3600   # ~2 days
+
+# VTEC deduplication key regex:
+# /product_class.action.OFFICE.phenom.sig.ETN.begin-end/
+# e.g.  /O.CON.KTFX.HW.W.0020.000000T0000Z-260408T0300Z/
+_VTEC_RE = re.compile(
+    r'/[A-Z]\.[A-Z]{2,3}\.([A-Z0-9]{4})\.([A-Z]{2})\.([A-Z])\.(\d{4})\.')
 
 # ------------------------------------------------------------
 # Helpers
@@ -75,38 +81,24 @@ def fetch_alerts():
 def sanitize_id(s: str) -> str:
     return re.sub(r"[^A-Za-z0-9_-]", "_", s)[:80]
 
-def _first_ref_id_from_string(refs_str: str):
-    """
-    CAP 'references' string: 'sender,id,sent sender,id,sent ...'
-    Extract the first 'id' (middle token of the first triplet).
-    """
-    m = re.search(r'[^,\s]+,([^,\s]+),[^,\s]+', refs_str or "")
-    return m.group(1) if m else None
-
 def canonical_alert_group_id(props: dict) -> str:
     """
-    Stable 'group id' for an alert thread.
-    Prefer first ID in CAP 'references' chain (ties updates to original alert).
-    'references' may be a string or a list; handle both. Fallback to this id/hash.
+    Stable group ID for an alert thread.
+
+    Primary key: VTEC office+phenomenon+significance+ETN
+    (e.g. 'KTFX.HW.W.0020').  This string is identical across every
+    NEW / CON / EXT / EXP / CAN message for the same weather event,
+    so each event fires the pager exactly once per subscriber regardless
+    of how many update messages the NWS issues.
+
+    Fallback: the alert's own @id (for advisories and statements that
+    carry no VTEC, such as Special Weather Statements).
     """
-    refs = props.get("references")
-    ref_id = None
-    if isinstance(refs, str):
-        ref_id = _first_ref_id_from_string(refs)
-    elif isinstance(refs, list):
-        for item in refs:
-            if isinstance(item, str):
-                ref_id = _first_ref_id_from_string(item)
-                if ref_id:
-                    break
-            elif isinstance(item, dict):
-                # NWS GeoJSON commonly uses a list of reference objects.
-                # Prefer the stable identifier to tie updates to the same thread.
-                ref_id = item.get("identifier") or item.get("@id")
-                if ref_id:
-                    break
-    if ref_id:
-        return ref_id
+    vtec_list = (props.get("parameters") or {}).get("VTEC") or []
+    for vtec_str in vtec_list:
+        m = _VTEC_RE.search(vtec_str)
+        if m:
+            return f"{m.group(1)}.{m.group(2)}.{m.group(3)}.{m.group(4)}"
     return props.get("id") or hashlib.sha1(json.dumps(props, sort_keys=True).encode()).hexdigest()
 
 def extract_weather_phenomenon(description: str) -> str:
@@ -184,7 +176,7 @@ def tts_wav16_base(text: str, same_code: str, group_id: str) -> str:
         try:
             subprocess.run([
                 "sox", str(final_wav16),
-                "-r", "8000", "-c", "1", "-e", "u-law",
+                "-r", "8000", "-c", "1", "-b", "8", "-e", "u-law", "-t", "ul",
                 str(tmp_mig)
             ], check=True)
             tmp_mig.replace(final_ulaw)
@@ -203,7 +195,7 @@ def tts_wav16_base(text: str, same_code: str, group_id: str) -> str:
         try:
             subprocess.run([
                 "sox", str(legacy_wav),
-                "-r", "8000", "-c", "1", "-e", "u-law",
+                "-r", "8000", "-c", "1", "-b", "8", "-e", "u-law", "-t", "ul",
                 str(tmp_mig)
             ], check=True)
             tmp_mig.replace(final_ulaw)
@@ -222,9 +214,10 @@ def tts_wav16_base(text: str, same_code: str, group_id: str) -> str:
     subprocess.run(["pico2wave", "-l", "en-US", "-w", str(tmp_in), text], check=True)
 
     # Primary: raw G.711 μ-law — always playable by Asterisk
+    # -b 8: G.711 u-law is 8-bit; -t ul: write raw headerless u-law (no WAV wrapper)
     subprocess.run([
         "sox", str(tmp_in),
-        "-r", "8000", "-c", "1", "-e", "u-law",
+        "-r", "8000", "-c", "1", "-b", "8", "-e", "u-law", "-t", "ul",
         str(tmp_ulaw)
     ], check=True)
 
@@ -251,22 +244,18 @@ def tts_wav16_base(text: str, same_code: str, group_id: str) -> str:
 
 def page_extension(ext: str, playback_base: str):
     """
-    Auto-answer via *80, prepend silence/1 N times (post-answer delay),
-    then play the file; set CallerID to 'System Alert'.
+    Auto-answer via *80 intercom, wait NWS_PREWAIT_SEC seconds for the phone
+    to auto-answer, then play the alert audio.  The playback path and wait
+    duration are passed as channel variables so the dialplan extension name
+    stays a simple, fixed string with no embedded slashes or ampersands.
     """
-    if NWS_PREWAIT_SEC > 0:
-        play_chain = "&".join(["silence/1"] * NWS_PREWAIT_SEC + [playback_base])
-    else:
-        play_chain = playback_base
-
-    # Use the context/exten/priority form so that callerid is honoured by
-    # Asterisk before the channel is answered.  The 'application' form
-    # ignores the trailing callerid token and falls back to the PBX IP.
     subprocess.run([
         "asterisk", "-rx",
         f"channel originate Local/*80{ext}@from-internal"
-        f" extension {play_chain}@app-nws-alert-play"
+        f" extension nws_alert@app-nws-alert-play"
         f" callerid \"{CID_NAME}\" <{CID_NUM}>"
+        f" variable NWS_PLAYBACK={playback_base}"
+        f" variable NWS_PREWAIT={NWS_PREWAIT_SEC}"
     ], check=False)
 
 
@@ -284,11 +273,9 @@ def cleanup_old_audio():
 # Main
 # ------------------------------------------------------------
 def main():
-    global same_codes_lookup
-    
     subs = load_json(SUBS_FILE, [])
     state = load_json(STATE_FILE, {"seen_pairs": []})
-    same_codes_lookup = load_same_codes()  # Load SAME code -> county mapping
+    same_codes_lookup = load_same_codes()
     seen_pairs = set(state.get("seen_pairs", []))   # keys: "<group_id>|<ext>"
 
     alerts = fetch_alerts()
